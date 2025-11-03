@@ -1,0 +1,14 @@
+SPLIT : Train(Train, DEV) Test
+
+Todos un mismo BASELINE 
+
+EXPERIMENTACIÓN: Cada componenete tiene que hacer un experimento
+
+INDIVIDUAL: RQ
+
+	- Antecedentes -> vectorización (Tipo, Dimensión)
+	- Clasificadores: RRNN, LLM
+	- Costes (Mean,Tiempo)
+	- Robusto al ruido % vs F
+	- Antecedentes: Gaps/Weak
+
