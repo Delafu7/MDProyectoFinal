@@ -4,6 +4,17 @@ Todos un mismo BASELINE
 
 EXPERIMENTACIÓN: Cada componenete tiene que hacer un experimento
 
+IDEAS DADAS:
+
+- Uno que analice la velocidad y la memoria de los modelos.
+
+- Otro que compare modelos basados en perceptrones con los modelos vistos en  tercero (RandomForest) ruido
+
+- Otro latencia de F-score en los modelos
+
+- Otro que lo haga embedings con Roberta/Deberta/TF-IDF
+
+
 INDIVIDUAL: RQ
 
 	- Antecedentes -> vectorización (Tipo, Dimensión)
