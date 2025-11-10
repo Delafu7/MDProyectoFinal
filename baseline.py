@@ -121,11 +121,10 @@ def generar_embeddings_csv(input_folder, output_folder, model_name="roberta-base
                 else:
                     raise ValueError("pooling debe ser 'cls' o 'mean'")
 
-            # Guardar embedding por mensaje
-            for e in emb:
-                usuarios.append(usuario)
-                embeddings_list.append(e.numpy().tolist())
-                labels.append(label)
+            emb_usuario = emb.mean(dim=0)  # (hidden)
+            usuarios.append(usuario)
+            embeddings_list.append(emb_usuario.detach().cpu().numpy().tolist())
+            labels.append(label)
 
         df_out = pd.DataFrame({
             'usuario': usuarios,
@@ -229,7 +228,7 @@ def evaluar_baseline(embeddings_folder):
 
 if __name__ == "__main__":
     # Paso 1: procesar archivos JSON → CSVs con mensajes y etiquetas
-    procesar_mentalrisk_arrays("MentalRiskEs2023", "output")
+    #procesar_mentalrisk_arrays("MentalRiskEs2023", "output")
 
     # Paso 2: generar embeddings de los CSVs creados
     generar_embeddings_csv("output", "output_tokenized", model_name="roberta-base", pooling="cls")
