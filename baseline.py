@@ -15,6 +15,91 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import ast
 
+
+# -----------------------------------------------------
+# FRASES SEMILLA
+# -----------------------------------------------------
+SEMILLAS = {
+    "depresion": [
+        "Me siento sin energía ni motivación.",
+        "No tengo ganas de hacer nada.",
+        "Me siento triste todo el tiempo."
+    ],
+    "ansiedad": [
+        "No puedo dejar de preocuparme.",
+        "Siento miedo constante y no sé por qué.",
+        "Mi corazón late muy rápido, me cuesta respirar."
+    ],
+    "tca": [
+        "Me siento culpable cuando como.",
+        "No me gusta mi cuerpo.",
+        "Trato de comer lo menos posible."
+    ]
+}
+
+def cosine_similarity(A, B):
+    """Calcula la similitud coseno entre dos conjuntos de vectores A y B."""
+    A_norm = A / A.norm(dim=1)[:, None]
+    B_norm = B / B.norm(dim=1)[:, None]
+    return torch.mm(A_norm, B_norm.t()).numpy()
+
+def generar_similitudes_semanticas(input_folder, output_file, model_name="roberta-base", pooling="cls"):
+    tokenizer = RobertaTokenizer.from_pretrained(model_name)
+    model = RobertaModel.from_pretrained(model_name)
+    model.eval()
+
+    input_folder = Path(input_folder)
+    resultados = []
+
+    # Pre-calculamos los embeddings de las frases semilla
+    semillas_embeddings = {}
+    for categoria, frases in SEMILLAS.items():
+        tokens = tokenizer(frases, padding=True, truncation=True, return_tensors="pt")
+        with torch.no_grad():
+            outputs = model(**tokens)
+            if pooling == "cls":
+                emb = outputs.last_hidden_state[:, 0, :]
+            else:
+                emb = outputs.last_hidden_state.mean(dim=1)
+        semillas_embeddings[categoria] = emb  # (n_frases, hidden)
+
+    for csv_file in input_folder.glob('*.csv'):
+        print(f"\n🔹 Procesando {csv_file.name}")
+        df = pd.read_csv(csv_file, converters={'mensajes': ast.literal_eval})
+
+        for _, row in df.iterrows():
+            usuario = row['sujeto']
+            mensajes = row['mensajes']
+            label = row['sufre']
+
+            # Obtener embedding de cada mensaje del usuario
+            tokens = tokenizer(mensajes, padding=True, truncation=True, return_tensors="pt")
+            with torch.no_grad():
+                outputs = model(**tokens)
+                if pooling == "cls":
+                    emb_msgs = outputs.last_hidden_state[:, 0, :]
+                else:
+                    emb_msgs = outputs.last_hidden_state.mean(dim=1)
+
+            # Calcular similitud media con cada categoría
+            sim_prom = {}
+            for cat, emb_cat in semillas_embeddings.items():
+                sim = cosine_similarity(emb_msgs.cpu(), emb_cat.cpu())
+                sim_prom[cat] = np.mean(sim)  # media de todas las combinaciones mensaje-semilla
+
+            resultados.append({
+                "usuario": usuario,
+                **sim_prom,
+                "label": label
+            })
+
+    # Guardar resultados
+    df_out = pd.DataFrame(resultados)
+    df_out.to_csv(output_file, index=False, encoding='utf-8')
+    print(f"Archivo de similitudes guardado en: {output_file}")
+    
+
+
 # -----------------------------------------------------
 #  FUNCIONES AUXILIARES
 # -----------------------------------------------------
@@ -72,7 +157,7 @@ def procesar_mentalrisk_arrays(root_folder, output_folder):
         # Guardamos los mensajes como string (para poder recuperarlos después)
         df_final['mensajes'] = df_final['mensajes'].apply(lambda x: str(x))
         df_final.to_csv(output_file, index=False, encoding='utf-8')
-        print(f"✅ Archivo creado: {output_file}")
+        print(f" Archivo creado: {output_file}")
 
 
 # -----------------------------------------------------
@@ -134,27 +219,41 @@ def generar_embeddings_csv(input_folder, output_folder, model_name="roberta-base
 
         output_file = output_folder / csv_file.name
         df_out.to_csv(output_file, index=False, encoding='utf-8')
-        print(f"✅ Embeddings guardados en: {output_file}")
+        print(f"Embeddings guardados en: {output_file}")
 
 # -----------------------------------------------------
 #  EVALUACIÓN DEL BASELINE
 # -----------------------------------------------------
 
-def evaluar_baseline(embeddings_folder):
+def evaluar_baseline(embeddings_folder, modo="embeddings", output_plots="plots"):
     """
-    Lee los CSVs con embeddings y ejecuta varios clasificadores para generar un baseline.
-    Calcula F1 y AUC promedio con desviación estándar.
+    Evalúa un baseline sobre embeddings o similitudes semánticas.
+    Guarda automáticamente las gráficas generadas.
     """
     embeddings_folder = Path(embeddings_folder)
+    output_plots = Path(output_plots)
+    output_plots.mkdir(parents=True, exist_ok=True)  # Crear carpeta si no existe
+
     resultados = []
 
     for csv_file in embeddings_folder.glob("*.csv"):
-        print(f"\n📊 Evaluando baseline para: {csv_file.name}")
-        df = pd.read_csv(csv_file, converters={'embedding': ast.literal_eval})
+        print(f"\n Evaluando baseline para: {csv_file.name}")
+        df = pd.read_csv(csv_file)
 
-        # Convertir a arrays numpy
-        X = np.vstack(df['embedding'].values)
-        y = df['label'].values
+        # --- Detectar modo ---
+        if modo == "auto":
+            modo = "similitudes" if {"depresion", "ansiedad", "tca"}.issubset(df.columns) else "embeddings"
+
+        # --- Preparar datos ---
+        if modo == "embeddings":
+            df["embedding"] = df["embedding"].apply(ast.literal_eval)
+            X = np.vstack(df["embedding"].values)
+            y = df["label"].values
+        elif modo == "similitudes":
+            X = df[["depresion", "ansiedad", "tca"]].values
+            y = df["label"].values
+        else:
+            raise ValueError("modo debe ser 'embeddings' o 'similitudes'")
 
         classifiers = {
             "LogReg": LogisticRegression(max_iter=1000),
@@ -163,7 +262,6 @@ def evaluar_baseline(embeddings_folder):
             "MLP": MLPClassifier(hidden_layer_sizes=(128,), max_iter=200)
         }
 
-        # Múltiples corridas para estabilidad
         for name, clf in classifiers.items():
             f1_scores, auc_scores = [], []
             for seed in range(5):
@@ -181,44 +279,56 @@ def evaluar_baseline(embeddings_folder):
                     ap = average_precision_score(y_test, probs)
                 else:
                     precision, recall, ap = None, None, np.nan
-                    
+
                 f1_scores.append(f1)
                 auc_scores.append(auc)
 
-                resultados.append({
-                    'dataset': csv_file.stem,
-                    'modelo': name,
-                    'F1_mean': np.mean(f1_scores),
-                    'F1_std': np.std(f1_scores),
-                    'AUC_mean': np.nanmean(auc_scores),
-                    'AUC_std': np.nanstd(auc_scores),
-                    'AP_mean': np.nanmean([ap])
-                })
-            # --- Dibujar curva PR sólo para el primer run y el modelo principal ---
+            resultados.append({
+                'dataset': csv_file.stem,
+                'modelo': name,
+                'modo': modo,
+                'F1_mean': np.mean(f1_scores),
+                'F1_std': np.std(f1_scores),
+                'AUC_mean': np.nanmean(auc_scores),
+                'AUC_std': np.nanstd(auc_scores),
+                'AP_mean': np.nanmean([ap])
+            })
+
+            # --- Curva Precision–Recall ---
             if name == "LogReg" and precision is not None:
                 plt.figure(figsize=(6, 4))
                 plt.plot(recall, precision, label=f'AP = {ap:.3f}')
                 plt.xlabel('Recall')
                 plt.ylabel('Precision')
-                plt.title(f'Curva Precision–Recall ({csv_file.stem} - {name})')
+                plt.title(f'Curva PR: {csv_file.stem} ({name}, {modo})')
                 plt.legend()
                 plt.tight_layout()
+
+                # Guardar figura
+                plot_path = output_plots / f"PR_{csv_file.stem}_{name}_{modo}.png"
+                plt.savefig(plot_path, dpi=300)
+                print(f"Guardada: {plot_path}")
                 plt.show()
 
-
+    # --- Resultados promedio ---
     df_res = pd.DataFrame(resultados)
     print("\n=== Resultados promedio ===")
     print(df_res)
 
-    # Visualización F1 promedio
     plt.figure(figsize=(8, 5))
     sns.barplot(data=df_res, x='modelo', y='F1_mean', hue='dataset')
-    plt.title("F1-score promedio por modelo")
+    plt.title(f"F1-score promedio por modelo ({modo})")
     plt.ylabel("F1 promedio (5 runs)")
     plt.tight_layout()
+
+    # Guardar figura final
+    summary_path = output_plots / f"F1_resumen_{modo}.png"
+    plt.savefig(summary_path, dpi=300)
+    print(f"Guardada: {summary_path}")
     plt.show()
 
     return df_res
+
 
 
 
@@ -228,10 +338,11 @@ def evaluar_baseline(embeddings_folder):
 
 if __name__ == "__main__":
     # Paso 1: procesar archivos JSON → CSVs con mensajes y etiquetas
-    #procesar_mentalrisk_arrays("MentalRiskEs2023", "output")
+    procesar_mentalrisk_arrays("MentalRiskEs2023", "output")
 
     # Paso 2: generar embeddings de los CSVs creados
-    generar_embeddings_csv("output", "output_tokenized", model_name="roberta-base", pooling="cls")
+    #generar_embeddings_csv("output", "output_tokenized", model_name="roberta-base", pooling="cls")
+    generar_similitudes_semanticas("output", "output_tokenized/similitudes_baseline.csv", model_name="roberta-base", pooling="cls")
     
     # Paso 3: evaluar baseline
-    resultados = evaluar_baseline("output_tokenized")
+    resultados = evaluar_baseline("output_tokenized/similitudes_baseline.csv")

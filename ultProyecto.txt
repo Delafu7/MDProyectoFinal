@@ -14,6 +14,145 @@ IDEAS DADAS:
 
 - Otro que lo haga embedings con Roberta/Deberta/TF-IDF
 
+=========================================================================================
+ALGUNAS OTRAS IDEAS:
+
+=========================================================================================
+
+1. Análisis de interpretabilidad y explicabilidad
+
+	En qué se diferencia: analiza por qué los modelos predicen lo que predicen.
+	Qué puede hacer:
+
+		- Usar técnicas como SHAP o LIME sobre los clasificadores entrenados (LogReg, RF, MLP).
+
+		- Mostrar qué dimensiones del embedding o qué frases influyen más en la detección de depresión/ansiedad.
+
+		- Comparar interpretabilidad entre modelos densos (MLP) y lineales (LogReg).
+
+		- Valor añadido: conecta la IA con la psicología — entender qué patrones textuales disparan la predicción.
+
+		- Entregable: visualizaciones tipo “feature importance” o “palabras más influyentes”.
+
+=========================================================================================
+
+2. Balance de clases y estrategias de re-muestreo
+
+En qué se diferencia: estudia cómo afecta el desequilibrio de clases (usuarios que sufren vs no sufren).
+Qué puede hacer:
+
+		- Comparar resultados con y sin técnicas de balanceo:
+
+		- SMOTE (oversampling)
+
+		- RandomUnderSampler
+
+		- Class weights en LogisticRegression / SVM
+
+		- Medir cómo varía el F1, AUC y recall para la clase minoritaria.
+		Valor añadido: aporta una capa de robustez estadística y mejora de sensibilidad del modelo.
+
+		- Entregable: tabla comparativa de métricas con distintas estrategias de balance.
+
+=========================================================================================
+
+3. Análisis de robustez frente a ruido y adversarial text
+
+En qué se diferencia: evalúa la resistencia del modelo a mensajes ruidosos o manipulados.
+Qué puede hacer:
+
+         Introducir ruido en los textos:
+
+			- Errores ortográficos
+
+			- Emojis o abreviaciones (“tngo mld”)
+
+			- Palabras fuera de dominio (“jajaja”, “xd”)
+
+			- Comparar caída del F1-score entre modelos (RandomForest vs SVM vs MLP).
+
+			- Analizar qué modelo es más robusto al ruido.
+
+Entregable: gráfico de degradación de rendimiento al aumentar el ruido textual.
+
+=========================================================================================
+
+
+4. Análisis de transferibilidad (cross-condition)
+
+En qué se diferencia: explora si el modelo entrenado en una condición (ej. depresión) generaliza a otra (ansiedad).
+Qué puede hacer:
+
+			-	Entrenar con un dataset (Depresión) y evaluar en otro (Ansiedad o TCA).
+
+			-	Ver si los embeddings captan señales comunes entre trastornos.
+
+			-	Comparar generalización entre representaciones (TF-IDF vs RoBERTa).
+			
+			Valor añadido: análisis científico de si las emociones negativas tienen representación semántica compartida.
+
+Entregable: matriz de confusión entre condiciones o gráfico de F1 cross-train-test.
+
+=========================================================================================
+
+
+5. Optimización de hiperparámetros y comparación automatizada
+
+En qué se diferencia: mide el impacto de los hiperparámetros y automatiza la búsqueda.
+Qué puede hacer:
+
+Usar GridSearchCV o Optuna para optimizar:
+
+	- C en LogisticRegression
+
+	- n_estimators y max_depth en RandomForest
+
+	- hidden_layer_sizes en MLP
+
+	- Comparar el rendimiento antes y después de optimizar.
+
+	- Mostrar la relación entre complejidad y rendimiento.
+
+Entregable: tabla y gráfico del espacio de hiperparámetros vs métricas (heatmap).
+
+=========================================================================================
+
+6. Análisis de eficiencia energética y coste computacional
+
+En qué se diferencia: mide tiempo, consumo de memoria y energía de los modelos.
+Qué puede hacer:
+
+	- Usar time y psutil para medir:
+
+	- Tiempo de entrenamiento
+
+	- Memoria usada (RAM)
+
+	- Tamaño del modelo guardado
+
+	- Comparar trade-off entre rendimiento y coste.
+	Valor añadido: conecta con sostenibilidad y eficiencia en IA.
+
+Entregable: tabla “rendimiento vs recursos” o radar chart comparativo.
+
+=========================================================================================
+
+7. Comparación de técnicas de reducción de dimensionalidad
+
+En qué se diferencia: aplica PCA, t-SNE o UMAP a los embeddings.
+Qué puede hacer:
+
+	- Reducir los embeddings (768 → 2 o 3 dimensiones).
+
+	- Visualizar la distribución de usuarios con/sin sufrimiento.
+
+	- Medir si la separación de clases se conserva después de reducción.
+
+	- Probar si el rendimiento mejora al entrenar modelos sobre versiones reducidas.
+
+Entregable: gráfico 2D/3D de los embeddings coloreado por clase.
+
+=========================================================================================
 
 INDIVIDUAL: RQ
 
