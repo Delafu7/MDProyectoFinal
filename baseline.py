@@ -4,6 +4,7 @@ from pathlib import Path
 from transformers import RobertaTokenizer, RobertaModel
 import torch
 import ast
+from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import f1_score, roc_auc_score ,precision_recall_curve, average_precision_score
 from sklearn.linear_model import LogisticRegression
@@ -51,7 +52,7 @@ def generar_similitudes_semanticas(input_folder, output_file, model_name="robert
     input_folder = Path(input_folder)
     resultados = []
 
-    # Pre-calculamos los embeddings de las frases semilla
+    # Pre-calcular embeddings de las frases semilla
     semillas_embeddings = {}
     for categoria, frases in SEMILLAS.items():
         tokens = tokenizer(frases, padding=True, truncation=True, return_tensors="pt")
@@ -61,43 +62,49 @@ def generar_similitudes_semanticas(input_folder, output_file, model_name="robert
                 emb = outputs.last_hidden_state[:, 0, :]
             else:
                 emb = outputs.last_hidden_state.mean(dim=1)
-        semillas_embeddings[categoria] = emb  # (n_frases, hidden)
+        semillas_embeddings[categoria] = emb
 
-    for csv_file in input_folder.glob('*.csv'):
-        print(f"\n🔹 Procesando {csv_file.name}")
-        df = pd.read_csv(csv_file, converters={'mensajes': ast.literal_eval})
+    # Calcular número total de filas a procesar (para progreso global)
+    total_filas = sum(len(pd.read_csv(f)) for f in input_folder.glob("*.csv"))
 
-        for _, row in df.iterrows():
-            usuario = row['sujeto']
-            mensajes = row['mensajes']
-            label = row['sufre']
+    # Crear barra de progreso global
+    with tqdm(total=total_filas, desc="Procesando archivos", unit="fila") as pbar:
+        for csv_file in input_folder.glob('*.csv'):
+            print(f"\n🔹 Procesando {csv_file.name}")
+            df = pd.read_csv(csv_file, converters={'mensajes': ast.literal_eval})
 
-            # Obtener embedding de cada mensaje del usuario
-            tokens = tokenizer(mensajes, padding=True, truncation=True, return_tensors="pt")
-            with torch.no_grad():
-                outputs = model(**tokens)
-                if pooling == "cls":
-                    emb_msgs = outputs.last_hidden_state[:, 0, :]
-                else:
-                    emb_msgs = outputs.last_hidden_state.mean(dim=1)
+            for _, row in df.iterrows():
+                usuario = row['sujeto']
+                mensajes = row['mensajes']
+                label = row['sufre']
 
-            # Calcular similitud media con cada categoría
-            sim_prom = {}
-            for cat, emb_cat in semillas_embeddings.items():
-                sim = cosine_similarity(emb_msgs.cpu(), emb_cat.cpu())
-                sim_prom[cat] = np.mean(sim)  # media de todas las combinaciones mensaje-semilla
+                tokens = tokenizer(mensajes, padding=True, truncation=True, return_tensors="pt")
+                with torch.no_grad():
+                    outputs = model(**tokens)
+                    if pooling == "cls":
+                        emb_msgs = outputs.last_hidden_state[:, 0, :]
+                    else:
+                        emb_msgs = outputs.last_hidden_state.mean(dim=1)
 
-            resultados.append({
-                "usuario": usuario,
-                **sim_prom,
-                "label": label
-            })
+                sim_prom = {}
+                for cat, emb_cat in semillas_embeddings.items():
+                    sim = cosine_similarity(emb_msgs.cpu(), emb_cat.cpu())
+                    sim_prom[cat] = np.mean(sim)
+
+                resultados.append({
+                    "usuario": usuario,
+                    **sim_prom,
+                    "label": label
+                })
+
+                # Actualizar barra de progreso
+                pbar.update(1)
 
     # Guardar resultados
     df_out = pd.DataFrame(resultados)
     df_out.to_csv(output_file, index=False, encoding='utf-8')
-    print(f"Archivo de similitudes guardado en: {output_file}")
-    
+    print(f"\n✅ Archivo de similitudes guardado en: {output_file}")
+
 
 
 # -----------------------------------------------------
