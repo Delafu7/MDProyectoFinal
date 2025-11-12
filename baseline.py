@@ -13,9 +13,11 @@ from sklearn.svm import SVC
 from sklearn.neural_network import MLPClassifier
 import numpy as np
 import seaborn as sns
+#import matplotlib
+#matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import ast
-
+import os
 
 # -----------------------------------------------------
 # FRASES SEMILLA
@@ -85,7 +87,7 @@ def generar_similitudes_semanticas(input_folder, output_file, model_name="robert
                         emb_msgs = outputs.last_hidden_state[:, 0, :]
                     else:
                         emb_msgs = outputs.last_hidden_state.mean(dim=1)
-
+                #emb_usuario = emb_msgs.mean(dim=0, keepdim=True)
                 sim_prom = {}
                 for cat, emb_cat in semillas_embeddings.items():
                     sim = cosine_similarity(emb_msgs.cpu(), emb_cat.cpu())
@@ -99,8 +101,9 @@ def generar_similitudes_semanticas(input_folder, output_file, model_name="robert
 
                 # Actualizar barra de progreso
                 pbar.update(1)
-
+    
     # Guardar resultados
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
     df_out = pd.DataFrame(resultados)
     df_out.to_csv(output_file, index=False, encoding='utf-8')
     print(f"\n✅ Archivo de similitudes guardado en: {output_file}")
@@ -236,15 +239,26 @@ def evaluar_baseline(embeddings_folder, modo="embeddings", output_plots="plots")
     """
     Evalúa un baseline sobre embeddings o similitudes semánticas.
     Guarda automáticamente las gráficas generadas.
+    Puede recibir una carpeta o un único archivo CSV.
     """
     embeddings_folder = Path(embeddings_folder)
     output_plots = Path(output_plots)
     output_plots.mkdir(parents=True, exist_ok=True)  # Crear carpeta si no existe
 
+    # 🔹 Detectar si es archivo único o carpeta
+    if embeddings_folder.is_file():
+        csv_files = [embeddings_folder]
+    else:
+        csv_files = list(embeddings_folder.glob("*.csv"))
+
+    if not csv_files:
+        print(f"⚠️ No se encontraron archivos CSV en {embeddings_folder.resolve()}")
+        return pd.DataFrame()
+
     resultados = []
 
-    for csv_file in embeddings_folder.glob("*.csv"):
-        print(f"\n Evaluando baseline para: {csv_file.name}")
+    for csv_file in csv_files:
+        print(f"\n📄 Evaluando baseline para: {csv_file.name}")
         df = pd.read_csv(csv_file)
 
         # --- Detectar modo ---
@@ -262,11 +276,20 @@ def evaluar_baseline(embeddings_folder, modo="embeddings", output_plots="plots")
         else:
             raise ValueError("modo debe ser 'embeddings' o 'similitudes'")
 
+        # --- Validación de datos ---
+        if len(np.unique(y)) < 2:
+            print(f"⚠️ Saltando {csv_file.name}: solo hay una clase en los datos.")
+            continue
+
+        if len(y) < 10:
+            print(f"⚠️ Saltando {csv_file.name}: muy pocos ejemplos ({len(y)} filas).")
+            continue
+
         classifiers = {
-            "LogReg": LogisticRegression(max_iter=1000),
-            "RandomForest": RandomForestClassifier(n_estimators=100),
-            "SVM": SVC(probability=True),
             "MLP": MLPClassifier(hidden_layer_sizes=(128,), max_iter=200)
+            ,"LogReg": LogisticRegression(max_iter=200)
+            ,"RandomForest": RandomForestClassifier(n_estimators=100)
+            ,"SVM": SVC(probability=True)
         }
 
         for name, clf in classifiers.items():
@@ -311,16 +334,19 @@ def evaluar_baseline(embeddings_folder, modo="embeddings", output_plots="plots")
                 plt.legend()
                 plt.tight_layout()
 
-                # Guardar figura
                 plot_path = output_plots / f"PR_{csv_file.stem}_{name}_{modo}.png"
                 plt.savefig(plot_path, dpi=300)
-                print(f"Guardada: {plot_path}")
-                plt.show()
+                print(f"📊 Guardada: {plot_path}")
+                plt.close()
 
     # --- Resultados promedio ---
     df_res = pd.DataFrame(resultados)
     print("\n=== Resultados promedio ===")
     print(df_res)
+
+    if df_res.empty:
+        print("⚠️ No se generaron resultados válidos.")
+        return df_res
 
     plt.figure(figsize=(8, 5))
     sns.barplot(data=df_res, x='modelo', y='F1_mean', hue='dataset')
@@ -328,15 +354,12 @@ def evaluar_baseline(embeddings_folder, modo="embeddings", output_plots="plots")
     plt.ylabel("F1 promedio (5 runs)")
     plt.tight_layout()
 
-    # Guardar figura final
     summary_path = output_plots / f"F1_resumen_{modo}.png"
     plt.savefig(summary_path, dpi=300)
-    print(f"Guardada: {summary_path}")
-    plt.show()
+    print(f"📊 Guardada: {summary_path}")
+    plt.close()
 
     return df_res
-
-
 
 
 # -----------------------------------------------------
@@ -344,12 +367,13 @@ def evaluar_baseline(embeddings_folder, modo="embeddings", output_plots="plots")
 # -----------------------------------------------------
 
 if __name__ == "__main__":
+    hacer_embeddings = True
     # Paso 1: procesar archivos JSON → CSVs con mensajes y etiquetas
     procesar_mentalrisk_arrays("MentalRiskEs2023", "output")
-
+    if hacer_embeddings:
     # Paso 2: generar embeddings de los CSVs creados
     #generar_embeddings_csv("output", "output_tokenized", model_name="roberta-base", pooling="cls")
-    generar_similitudes_semanticas("output", "output_tokenized/similitudes_baseline.csv", model_name="roberta-base", pooling="cls")
+        generar_similitudes_semanticas("output", "output_tokenized/similitudes_baseline.csv", model_name="roberta-base", pooling="cls")
     
     # Paso 3: evaluar baseline
-    resultados = evaluar_baseline("output_tokenized/similitudes_baseline.csv")
+    resultados = evaluar_baseline("output_tokenized/similitudes_baseline.csv", modo="similitudes", output_plots="plots")
