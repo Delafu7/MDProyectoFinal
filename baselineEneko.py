@@ -13,19 +13,14 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import ast
-import os
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import GridSearchCV
-from sentence_transformers import SentenceTransformer
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
-import torch.nn.functional as F
-from scipy.spatial.distance import cosine
-import joblib
-from sklearn.metrics import classification_report, confusion_matrix ,roc_curve, auc
+from sklearn.metrics import confusion_matrix 
 from tqdm import tqdm
 from time import time
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.dummy import DummyClassifier
+
 import nltk
 from nltk.corpus import stopwords
 nltk.download("stopwords")
@@ -88,176 +83,7 @@ def procesar_mentalrisk_arrays(root_folder, output_folder):
         df_final.to_csv(output_file, index=False, encoding='utf-8')
         print(f" Archivo creado: {output_file}")
 
-def baseline_robertuito(input_csv, output_dir="output_robertuito", seed=42):
-    """
-    Entrena un baseline con el modelo 'pysentimiento/robertuito-sentiment-analysis'
-    usando embeddings + distancias coseno + probabilidades de sentimiento.
-    Guarda métricas, parámetros y genera gráficas.
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    os.makedirs("plots", exist_ok=True)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    ROBERTA_MODEL = "pysentimiento/robertuito-sentiment-analysis"
-
-    tokenizer = AutoTokenizer.from_pretrained(ROBERTA_MODEL)
-    model_cls = AutoModelForSequenceClassification.from_pretrained(ROBERTA_MODEL).to(device)
-    embedder = SentenceTransformer(ROBERTA_MODEL, device=device)
-    predef_msg = "esto es lo peor que me ha pasado, tengo depresion, y no puedo dejar de comer comida poco sana"
-    predef_emb = embedder.encode(predef_msg, convert_to_numpy=True)
-
-    print(" Modelos cargados en", device)
-
-    # Leer CSV
-    df = pd.read_csv(input_csv)
-    if "mensajes" in df.columns:
-        df["mensajes"] = df["mensajes"].apply(ast.literal_eval)
-        texts = [" ".join(msgs) for msgs in df["mensajes"]]
-    elif "text" in df.columns:
-        texts = df["text"].astype(str).tolist()
-    else:
-        raise ValueError("El CSV debe contener columna 'mensajes' o 'text'")
-
-    if "label" in df.columns:
-        y = df["label"].astype(int).to_numpy()
-    elif "sufre" in df.columns:
-        y = df["sufre"].astype(int).to_numpy()
-    else:
-        raise ValueError("No se encontró ninguna columna de etiquetas ('label' o 'sufre') en el CSV.")
-    
-    # --- Funciones auxiliares ---
-    def get_sentiment_probs(texts, batch_size=16):
-        model_cls.eval()
-        probs = []
-        with torch.no_grad():
-            for i in range(0, len(texts), batch_size):
-                batch = texts[i:i+batch_size]
-                tokens = tokenizer(batch, padding=True, truncation=True, return_tensors="pt").to(device)
-                out = model_cls(**tokens)
-                logits = out.logits
-                batch_probs = F.softmax(logits, dim=-1).cpu().numpy()
-                probs.append(batch_probs)
-        return np.vstack(probs)
-
-    def get_embeddings_and_dists(texts):
-        embs = embedder.encode(texts, convert_to_numpy=True)
-        dists = np.array([cosine(e, predef_emb) for e in embs]).reshape(-1, 1)
-        return embs, dists
-
-    # --- Generar features ---
-    print("🔹 Generando features...")
-    probs = get_sentiment_probs(texts)
-    embs, dists = get_embeddings_and_dists(texts)
-    X = np.hstack([embs, probs, dists])
-
-    print(" Features generadas:", X.shape)
-
-    # --- Split train/test ---
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, stratify=y, random_state=seed
-    )
-
-    # --- Pipeline + búsqueda ---
-    pipeline = Pipeline([
-        ("scaler", StandardScaler()),
-        ("mlp", MLPClassifier(random_state=seed, max_iter=500))
-    ])
-
-    param_grid = {
-        "mlp__hidden_layer_sizes": [(64,), (128,), (128, 64)],
-        "mlp__alpha": [1e-4, 1e-3],
-        "mlp__learning_rate_init": [1e-3, 5e-4]
-    }
-
-    print("Entrenando MLP (GridSearchCV)...")
-    gs = GridSearchCV(pipeline, param_grid, cv=3, scoring="f1_macro", n_jobs=-1, verbose=1)
-    gs.fit(X_train, y_train)
-    print(" Entrenamiento completado. Mejores parámetros:", gs.best_params_)
-
-    # --- Evaluación ---
-    y_pred = gs.predict(X_test)
-    y_prob = gs.predict_proba(X_test)[:, 1] if hasattr(gs, "predict_proba") else None
-
-    f1 = f1_score(y_test, y_pred, average="macro")
-    acc = accuracy_score(y_test, y_pred)
-    prec = precision_score(y_test, y_pred, average="macro")
-    rec = recall_score(y_test, y_pred, average="macro")
-
-    print(f"\n🔹 F1 macro: {f1:.4f}")
-    print("\n Reporte de clasificación:\n", classification_report(y_test, y_pred))
-    print(" Matriz de confusión:\n", confusion_matrix(y_test, y_pred))
-
-    # Guardar modelo
-    model_path = os.path.join(output_dir, f"robertuito_mlp_{Path(input_csv).stem}.joblib")
-    joblib.dump(gs.best_estimator_, model_path)
-    print(f" Modelo guardado en: {model_path}")
-
-    # === Gráficas ===
-
-    base_name = Path(input_csv).stem
-
-    # Curva Precision–Recall
-    if y_prob is not None:
-        precision, recall, _ = precision_recall_curve(y_test, y_prob)
-        plt.figure()
-        plt.plot(recall, precision, label=f"F1 = {f1:.2f}")
-        plt.xlabel("Recall")
-        plt.ylabel("Precision")
-        plt.title(f"Curva Precision–Recall ({base_name})")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(f"plots/PR_curve_{base_name}.png", dpi=300)
-        plt.close()
-
-        # Curva ROC
-        fpr, tpr, _ = roc_curve(y_test, y_prob)
-        roc_auc = auc(fpr, tpr)
-        plt.figure()
-        plt.plot(fpr, tpr, label=f"AUC = {roc_auc:.2f}")
-        plt.plot([0, 1], [0, 1], "k--")
-        plt.xlabel("False Positive Rate")
-        plt.ylabel("True Positive Rate")
-        plt.title(f"Curva ROC ({base_name})")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(f"plots/ROC_curve_{base_name}.png", dpi=300)
-        plt.close()
-
-    # Matriz de confusión
-    cm = confusion_matrix(y_test, y_pred)
-    plt.figure(figsize=(4, 4))
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
-    plt.xlabel("Predicho")
-    plt.ylabel("Real")
-    plt.title(f"Matriz de confusión ({base_name})")
-    plt.tight_layout()
-    plt.savefig(f"plots/confusion_matrix_{base_name}.png", dpi=300)
-    plt.close()
-
-    # === Guardar resultados en CSV ===
-    from datetime import datetime
-    results_file = "resultados_baseline.csv"
-
-    registro = pd.DataFrame([{
-        "condicion": base_name,
-        "modelo": "MLPClassifier",
-        "parametros": str(gs.best_params_),
-        "f1_macro": round(f1, 4),
-        "accuracy": round(acc, 4),
-        "precision": round(prec, 4),
-        "recall": round(rec, 4),
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "modelo_path": model_path
-    }])
-
-    if os.path.exists(results_file):
-        registro.to_csv(results_file, mode='a', header=False, index=False)
-    else:
-        registro.to_csv(results_file, index=False)
-
-    print(f"Resultados y gráficas guardados en: {results_file} / plots/")
-
-    return f1
 
 # -----------------------------------------------------
 # -----------------------------------------------------
@@ -389,6 +215,20 @@ def cross_condition_experiment(train_csv, test_csv, output_dir="output_cross", s
     print(f"Resultados ({representation}) {train_name}→{test_name}")
     print(f"  F1: {f1:.4f} | Acc: {acc:.4f} | Prec: {prec:.4f} | Rec: {rec:.4f}")
 
+        # ---------- BASELINE: DummyClassifier ----------
+    dummy = DummyClassifier(strategy="most_frequent")
+    dummy.fit(X_train, y_train)
+    dummy_pred = dummy.predict(X_test)
+
+    f1_dummy = f1_score(y_test, dummy_pred, average="macro")
+    acc_dummy = accuracy_score(y_test, dummy_pred)
+    prec_dummy = precision_score(y_test, dummy_pred, average="macro")
+    rec_dummy = recall_score(y_test, dummy_pred, average="macro")
+
+    print("\n[BASELINE DummyClassifier]")
+    print(f"  F1: {f1_dummy:.4f} | Acc: {acc_dummy:.4f} | Prec: {prec_dummy:.4f} | Rec: {rec_dummy:.4f}\n")
+
+
     # --- Matriz de confusión ---
     cm = confusion_matrix(y_test, y_pred)
     plt.figure(figsize=(4, 4))
@@ -400,15 +240,21 @@ def cross_condition_experiment(train_csv, test_csv, output_dir="output_cross", s
     plt.savefig(os.path.join(output_dir, f"conf_matrix_{representation}_{train_name}_to_{test_name}.png"), dpi=300)
     plt.close()
 
-    # --- Guardar resultados ---
+        # ---------- GUARDAR RESULTADOS ----------
     registro = pd.DataFrame([{
         "train_cond": train_name,
         "test_cond": test_name,
         "representation": representation,
+
         "f1_macro": f1,
         "accuracy": acc,
         "precision": prec,
-        "recall": rec
+        "recall": rec,
+
+        "dummy_f1_macro": f1_dummy,
+        "dummy_accuracy": acc_dummy,
+        "dummy_precision": prec_dummy,
+        "dummy_recall": rec_dummy
     }])
 
     results_file = os.path.join(output_dir, "cross_condition_results.csv")
@@ -469,4 +315,43 @@ if __name__ == "__main__":
     plt.title("Transferibilidad TF-IDF (F1 macro)")
     plt.tight_layout()
     plt.savefig("output_cross/f1_heatmap_tfidf.png", dpi=300)
+    plt.close()
+
+     # === Gráfica TRIPLE: RoBERTuito vs TF-IDF vs Dummy ===
+    print("\nGenerando gráfica comparativa triple (RoBERTuito vs TF-IDF vs Baseline)...")
+
+    # Crear dataframe largo
+    plot_rows = []
+
+    for _, row in df_all.iterrows():
+        plot_rows.append({
+            "train_cond": row["train_cond"],
+            "test_cond": row["test_cond"],
+            "representation": row["representation"],   # roberta / tfidf
+            "f1": row["f1_macro"]
+        })
+        plot_rows.append({
+            "train_cond": row["train_cond"],
+            "test_cond": row["test_cond"],
+            "representation": "DummyClassifier",              # DummyClassifier
+            "f1": row["dummy_f1_macro"]
+        })
+
+    df_plot = pd.DataFrame(plot_rows)
+
+    # Gráfica
+    plt.figure(figsize=(9, 5))
+    sns.barplot(
+        data=df_plot,
+        x="train_cond",
+        y="f1",
+        hue="representation"
+    )
+    plt.title("Comparación RoBERTuito vs TF-IDF vs Baseline (Cross-condition)")
+    plt.ylabel("F1 Macro")
+    plt.xlabel("Condición de entrenamiento")
+    plt.legend(title="Representación")
+    plt.tight_layout()
+
+    plt.savefig("output_cross/f1_comparison_triple.png", dpi=300)
     plt.close()
