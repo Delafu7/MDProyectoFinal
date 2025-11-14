@@ -20,7 +20,11 @@ from tqdm import tqdm
 from time import time
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.dummy import DummyClassifier
-
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from sentence_transformers import SentenceTransformer
+import torch.nn.functional as F
+from scipy.spatial.distance import cosine
+import os
 import nltk
 from nltk.corpus import stopwords
 nltk.download("stopwords")
@@ -92,13 +96,13 @@ def procesar_mentalrisk_arrays(root_folder, output_folder):
 
 
 
-def cross_condition_experiment(train_csv, test_csv, output_dir="output_cross", seed=42, representation="roberta"):
+def cross_condition_experiment(train_csv, test_csv, output_dir="output_cross", seed=42, representation="robertuito"):
     """
     Entrena y evalúa un modelo cross-condition entre dos datasets (ej. Depresión→Ansiedad).
     Puede usar representaciones "roberta" o "tfidf".
     Muestra barras de progreso y guarda resultados + gráficas.
     """
-    import os
+
     os.makedirs(output_dir, exist_ok=True)
 
     train_name = Path(train_csv).stem
@@ -132,11 +136,8 @@ def cross_condition_experiment(train_csv, test_csv, output_dir="output_cross", s
     print(f"Train: {len(X_train_texts)} ejemplos | Test: {len(X_test_texts)} ejemplos\n")
 
     # --- Representaciones ---
-    if representation == "roberta":
-        from transformers import AutoTokenizer, AutoModelForSequenceClassification
-        from sentence_transformers import SentenceTransformer
-        import torch.nn.functional as F
-        from scipy.spatial.distance import cosine
+    if representation == "robertuito":
+
 
         ROBERTA_MODEL = "pysentimiento/robertuito-sentiment-analysis"
         tokenizer = AutoTokenizer.from_pretrained(ROBERTA_MODEL)
@@ -192,16 +193,54 @@ def cross_condition_experiment(train_csv, test_csv, output_dir="output_cross", s
     else:
         raise ValueError("representation debe ser 'roberta' o 'tfidf'.")
 
-    # --- Entrenamiento ---
+   
+     # ============================================================
+    # === DIVISIÓN INTERNA DEL TRAIN PARA EVITAR SOBREAJUSTE =====
+    # ============================================================
+
+    print("\nDividiendo internamente el dataset de entrenamiento (80/20)...")
+
+    X_train_i, X_val, y_train_i, y_val = train_test_split(
+        X_train, y_train,
+        test_size=0.20,
+        random_state=seed,
+        stratify=y_train
+    )
+
+    print(f"Train interno: {X_train_i.shape[0]}  |  Validación interna: {X_val.shape[0]}")
+
+
+    # =============================
+    # === ENTRENAMIENTO DEL MLP ===
+    # =============================
+
     pipeline = Pipeline([
         ("scaler", StandardScaler(with_mean=False) if representation=="tfidf" else StandardScaler()),
-        ("mlp", MLPClassifier(random_state=seed, max_iter=500, hidden_layer_sizes=(128, 64)))
+        ("mlp", MLPClassifier(
+            random_state=seed,
+            hidden_layer_sizes=(128, 64),
+            max_iter=500,
+            early_stopping=True,         # <-- clave para evitar overfitting
+            validation_fraction=0.2,     # <-- MLP hará su propia validación
+            n_iter_no_change=10,
+            learning_rate_init=0.001
+        ))
     ])
 
-    print("\n Entrenando modelo cross-condition...")
+    print("\n Entrenando modelo cross-condition (con validación interna)...")
     t_train = time()
-    pipeline.fit(X_train, y_train)
+    pipeline.fit(X_train_i, y_train_i)
     print(f"Entrenamiento completado en {round((time()-t_train)/60, 2)} min\n")
+
+    # =============================
+    # === VALIDACIÓN INTERNA     ===
+    # =============================
+
+    val_pred = pipeline.predict(X_val)
+    f1_val = f1_score(y_val, val_pred, average="macro")
+    acc_val = accuracy_score(y_val, val_pred)
+
+    print(f"[Validación interna]  F1={f1_val:.4f} | ACC={acc_val:.4f}\n")
 
     # --- Evaluación ---
     y_pred = pipeline.predict(X_test)
@@ -275,11 +314,13 @@ if __name__ == "__main__":
         ("output/Depresión.csv", "output/Ansiedad.csv"),
         ("output/Depresión.csv", "output/TCA.csv"),
         ("output/Ansiedad.csv", "output/Depresión.csv"),
-        ("output/TCA.csv", "output/Depresión.csv")
+        ("output/TCA.csv", "output/Depresión.csv"),
+        ("output/Ansiedad.csv", "output/TCA.csv"),
+        ("output/TCA.csv", "output/Ansiedad.csv")
     ]
 
     resultados = []
-    for rep in ["roberta", "tfidf"]:
+    for rep in ["robertuito", "tfidf"]:
         for train_csv, test_csv in pairs:
             res = cross_condition_experiment(train_csv, test_csv, representation=rep)
             resultados.append(res)
@@ -288,6 +329,29 @@ if __name__ == "__main__":
     print("\n=== RESULTADOS CROSS-CONDITION ===")
     print(df_all)
 
+    # ---------------------------
+    # PROMEDIOS CROSS-CONDITION
+    # ---------------------------
+    # Esto se puede poner después de que hayas generado `df_all` y antes de guardar gráficos
+
+    promedios = []
+
+    for rep in ["robertuito", "tfidf"]:
+        df_rep = df_all[df_all["representation"] == rep]
+        
+        promedios.append({
+            "representation": rep,
+            "mlp_f1_macro": df_rep["f1_macro"].mean(),
+            "mlp_accuracy": df_rep["accuracy"].mean(),
+            "dummy_f1_macro": df_rep["dummy_f1_macro"].mean(),
+            "dummy_accuracy": df_rep["dummy_accuracy"].mean()
+        })
+
+    df_promedios = pd.DataFrame(promedios)
+    print("\n=== PROMEDIOS CROSS-CONDITION ===")
+    print(df_promedios)
+    df_promedios.to_csv("output_cross/cross_condition_promedios.csv", index=False)
+    
     # --- Gráfica comparativa ---
     plt.figure(figsize=(6,4))
     sns.barplot(data=df_all, x="train_cond", y="f1_macro", hue="representation")
@@ -296,16 +360,16 @@ if __name__ == "__main__":
     plt.xlabel("Condición de entrenamiento")
     plt.legend(title="Representación")
     plt.tight_layout()
-    plt.savefig("output_cross/f1_comparison_tfidf_vs_roberta.png", dpi=300)
+    plt.savefig("output_cross/f1_comparison_tfidf_vs_robertuito.png", dpi=300)
     plt.close()
 
     # Heatmap F1 para RoBERTuito
-    pivot_roberta = df_all[df_all["representation"]=="roberta"].pivot(index="train_cond", columns="test_cond", values="f1_macro")
+    pivot_roberta = df_all[df_all["representation"]=="robertuito"].pivot(index="train_cond", columns="test_cond", values="f1_macro")
     plt.figure(figsize=(5,4))
     sns.heatmap(pivot_roberta, annot=True, cmap="mako", fmt=".3f")
     plt.title("Transferibilidad RoBERTuito (F1 macro)")
     plt.tight_layout()
-    plt.savefig("output_cross/f1_heatmap_roberta.png", dpi=300)
+    plt.savefig("output_cross/f1_heatmap_robertuito.png", dpi=300)
     plt.close()
 
     # Heatmap F1 para TF-IDF
