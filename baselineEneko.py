@@ -354,29 +354,52 @@ if __name__ == "__main__":
     # ---------------------------
     # PROMEDIOS CROSS-CONDITION
     # ---------------------------
-    # Esto se puede poner después de que hayas generado `df_all` y antes de guardar gráficos
 
     promedios = []
 
     for rep in ["robertuito", "tfidf"]:
         df_rep = df_all[df_all["representation"] == rep]
-        
+
+        # Filtrar por cada clasificador
+        df_mlp    = df_rep[df_rep["classifier"] == "MLP"]
+        df_logreg = df_rep[df_rep["classifier"] == "LogReg"]
+        df_svm    = df_rep[df_rep["classifier"] == "SVM"]
+        df_rf     = df_rep[df_rep["classifier"] == "RandomForest"]
+        df_dummy  = df_rep[df_rep["classifier"] == "Dummy"]
+
         promedios.append({
             "representation": rep,
-            "mlp_f1_macro": df_rep["f1_macro"].mean(),
-            "mlp_accuracy": df_rep["accuracy"].mean(),
-            "dummy_f1_macro": df_rep["dummy_f1_macro"].mean(),
-            "dummy_accuracy": df_rep["dummy_accuracy"].mean()
+
+            # MLP
+            "mlp_f1_macro": df_mlp["f1_mean"].mean(),
+            "mlp_accuracy": df_mlp["acc_mean"].mean(),
+
+            # Logistic Regression
+            "logreg_f1_macro": df_logreg["f1_mean"].mean(),
+            "logreg_accuracy": df_logreg["acc_mean"].mean(),
+
+            # SVM
+            "svm_f1_macro": df_svm["f1_mean"].mean(),
+            "svm_accuracy": df_svm["acc_mean"].mean(),
+
+            # Random Forest
+            "rf_f1_macro": df_rf["f1_mean"].mean(),
+            "rf_accuracy": df_rf["acc_mean"].mean(),
+
+            # Dummy baseline
+            "dummy_f1_macro": df_dummy["f1_mean"].mean(),
+            "dummy_accuracy": df_dummy["acc_mean"].mean()
         })
 
     df_promedios = pd.DataFrame(promedios)
-    print("\n=== PROMEDIOS CROSS-CONDITION ===")
+    print("\n=== PROMEDIOS CROSS-CONDITION POR CLASIFICADOR ===")
     print(df_promedios)
+
     df_promedios.to_csv("output_cross/cross_condition_promedios.csv", index=False)
     
     # --- Gráfica comparativa ---
     plt.figure(figsize=(6,4))
-    sns.barplot(data=df_all, x="train_cond", y="f1_macro", hue="representation")
+    sns.barplot(data=df_all, x="train_cond", y="f1_mean", hue="representation", errorbar=None)
     plt.title("Comparación TF-IDF vs RoBERTuito (Cross-condition)")
     plt.ylabel("F1 Macro")
     plt.xlabel("Condición de entrenamiento")
@@ -385,75 +408,77 @@ if __name__ == "__main__":
     plt.savefig("output_cross/f1_comparison_tfidf_vs_robertuito.png", dpi=300)
     plt.close()
 
+
     # Heatmap F1 para RoBERTuito
-    pivot_roberta = df_all[df_all["representation"]=="robertuito"].pivot(index="train_cond", columns="test_cond", values="f1_macro")
-    plt.figure(figsize=(5,4))
-    sns.heatmap(pivot_roberta, annot=True, cmap="mako", fmt=".3f")
-    plt.title("Transferibilidad RoBERTuito (F1 macro)")
-    plt.tight_layout()
-    plt.savefig("output_cross/f1_heatmap_robertuito.png", dpi=300)
-    plt.close()
+# Agrupar para dejar una sola fila por combinación
+    classifiers = df_all["classifier"].unique()
 
-    # Heatmap F1 para TF-IDF
-    pivot_tfidf = df_all[df_all["representation"]=="tfidf"].pivot(index="train_cond", columns="test_cond", values="f1_macro")
-    plt.figure(figsize=(5,4))
-    sns.heatmap(pivot_tfidf, annot=True, cmap="crest", fmt=".3f")
-    plt.title("Transferibilidad TF-IDF (F1 macro)")
-    plt.tight_layout()
-    plt.savefig("output_cross/f1_heatmap_tfidf.png", dpi=300)
-    plt.close()
+    for clf in classifiers:
+        for rep in ["robertuito", "tfidf"]:
 
-     # === Gráfica TRIPLE: RoBERTuito vs TF-IDF vs Dummy ===
-    print("\nGenerando gráfica comparativa triple (RoBERTuito vs TF-IDF vs Baseline)...")
+            df_sub = df_all[
+                (df_all["representation"] == rep) &
+                (df_all["classifier"] == clf)
+            ].groupby(["train_cond", "test_cond"])["f1_mean"].mean().reset_index()
 
-    # Crear dataframe largo
+            pivot = df_sub.pivot(index="train_cond", columns="test_cond", values="f1_mean")
+
+            plt.figure(figsize=(5,4))
+            sns.heatmap(pivot, annot=True, cmap="mako" if rep=="robertuito" else "crest", fmt=".3f")
+            plt.title(f"Transferibilidad {rep.upper()} – {clf} (F1 macro)")
+            plt.tight_layout()
+            plt.savefig(f"output_cross/heatmap_{rep}_{clf}.png", dpi=300)
+            plt.close()
+
+    # === Gráfica TRIPLE: RoBERTuito vs TF-IDF vs Dummy ===
     plot_rows = []
 
     for _, row in df_all.iterrows():
+        # Representación normal (RoBERTuito / TFIDF)
         plot_rows.append({
             "train_cond": row["train_cond"],
             "test_cond": row["test_cond"],
-            "representation": row["representation"],   # roberta / tfidf
-            "f1": row["f1_macro"]
+            "representation": row["representation"],
+            "f1": row["f1_mean"]
         })
-        plot_rows.append({
-            "train_cond": row["train_cond"],
-            "test_cond": row["test_cond"],
-            "representation": "DummyClassifier",              # DummyClassifier
-            "f1": row["dummy_f1_macro"]
-        })
+        # Dummy, en su propia categoría
+        if row["classifier"] == "Dummy":
+            plot_rows.append({
+                "train_cond": row["train_cond"],
+                "test_cond": row["test_cond"],
+                "representation": "Dummy",
+                "f1": row["f1_mean"]
+            })
 
     df_plot = pd.DataFrame(plot_rows)
 
-    # Gráfica
     plt.figure(figsize=(9, 5))
     sns.barplot(
         data=df_plot,
         x="train_cond",
         y="f1",
-        hue="representation"
+        hue="representation",
+        errorbar=None
     )
     plt.title("Comparación RoBERTuito vs TF-IDF vs Baseline (Cross-condition)")
     plt.ylabel("F1 Macro")
     plt.xlabel("Condición de entrenamiento")
-    plt.legend(title="Representación")
     plt.tight_layout()
-
     plt.savefig("output_cross/f1_comparison_triple.png", dpi=300)
     plt.close()
-    
-    # === NUEVA GRÁFICA: Todos los modelos ===
-# Crear dataframe largo con todos los modelos
-plot_rows = []
 
-for _, row in df_all.iterrows():
-    model_name = f"{row['representation'].capitalize()} + {row['classifier']}"
-    plot_rows.append({
-        "train_cond": row["train_cond"],
-        "test_cond": row["test_cond"],
-        "model": model_name,
-        "f1": row["f1_mean"]
-    })
+
+    # Gráfica
+    plot_rows = []
+
+    for _, row in df_all.iterrows():
+        model_name = f"{row['representation'].upper()} + {row['classifier']}"
+        plot_rows.append({
+            "train_cond": row["train_cond"],
+            "test_cond": row["test_cond"],
+            "model": model_name,
+            "f1": row["f1_mean"]
+        })
 
     df_plot = pd.DataFrame(plot_rows)
 
@@ -463,7 +488,40 @@ for _, row in df_all.iterrows():
         x="train_cond",
         y="f1",
         hue="model",
-        palette="Set2"
+        palette="Set2", 
+        errorbar=None
+    )
+    plt.title("Comparativa Cross-Condition: Todos los modelos")
+    plt.ylabel("F1 Macro")
+    plt.xlabel("Condición de entrenamiento")
+    plt.ylim(0,1)
+    plt.legend(title="Modelo", bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.tight_layout()
+    plt.savefig("output_cross/f1_comparison_all_models.png", dpi=300)
+    plt.close()
+
+    # === NUEVA GRÁFICA: Todos los modelos ===
+    plot_rows = []
+
+    for _, row in df_all.iterrows():
+        model_name = f"{row['representation'].upper()} + {row['classifier']}"
+        plot_rows.append({
+            "train_cond": row["train_cond"],
+            "test_cond": row["test_cond"],
+            "model": model_name,
+            "f1": row["f1_mean"]
+        })
+
+    df_plot = pd.DataFrame(plot_rows)
+
+    plt.figure(figsize=(12,6))
+    sns.barplot(
+        data=df_plot,
+        x="train_cond",
+        y="f1",
+        hue="model",
+        palette="Set2",
+        errorbar=None
     )
     plt.title("Comparativa Cross-Condition: Todos los modelos")
     plt.ylabel("F1 Macro")
