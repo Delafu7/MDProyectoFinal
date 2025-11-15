@@ -138,7 +138,6 @@ def cross_condition_experiment(train_csv, test_csv, output_dir="output_cross", s
     # --- Representaciones ---
     if representation == "robertuito":
 
-
         ROBERTA_MODEL = "pysentimiento/robertuito-sentiment-analysis"
         tokenizer = AutoTokenizer.from_pretrained(ROBERTA_MODEL)
         model_cls = AutoModelForSequenceClassification.from_pretrained(ROBERTA_MODEL).to(device)
@@ -193,116 +192,139 @@ def cross_condition_experiment(train_csv, test_csv, output_dir="output_cross", s
     else:
         raise ValueError("representation debe ser 'roberta' o 'tfidf'.")
 
-   
-     # ============================================================
-    # === DIVISIÓN INTERNA DEL TRAIN PARA EVITAR SOBREAJUSTE =====
+    # ============================================================
+    # === MULTI-CLASIFICADORES + MULTI-RUN                     ===
     # ============================================================
 
-    print("\nDividiendo internamente el dataset de entrenamiento (80/20)...")
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.svm import SVC
+    from sklearn.ensemble import RandomForestClassifier
 
-    X_train_i, X_val, y_train_i, y_val = train_test_split(
-        X_train, y_train,
-        test_size=0.20,
-        random_state=seed,
-        stratify=y_train
-    )
+    N_RUNS = 5
 
-    print(f"Train interno: {X_train_i.shape[0]}  |  Validación interna: {X_val.shape[0]}")
-
-
-    # =============================
-    # === ENTRENAMIENTO DEL MLP ===
-    # =============================
-
-    pipeline = Pipeline([
-        ("scaler", StandardScaler(with_mean=False) if representation=="tfidf" else StandardScaler()),
-        ("mlp", MLPClassifier(
+    classifiers = {
+        "MLP": MLPClassifier(
             random_state=seed,
             hidden_layer_sizes=(128, 64),
             max_iter=500,
-            early_stopping=True,         # <-- clave para evitar overfitting
-            validation_fraction=0.2,     # <-- MLP hará su propia validación
+            early_stopping=True,
+            validation_fraction=0.2,
             n_iter_no_change=10,
             learning_rate_init=0.001
-        ))
-    ])
+        ),
+        "LogReg": LogisticRegression(max_iter=2000),
+        "SVM": SVC(probability=True),
+        "RandomForest": RandomForestClassifier(n_estimators=300, random_state=seed)
+    }
 
-    print("\n Entrenando modelo cross-condition (con validación interna)...")
-    t_train = time()
-    pipeline.fit(X_train_i, y_train_i)
-    print(f"Entrenamiento completado en {round((time()-t_train)/60, 2)} min\n")
+    results = []
+    best_clf_name = None
+    best_f1 = -1
+    best_model = None
 
-    # =============================
-    # === VALIDACIÓN INTERNA     ===
-    # =============================
+    for clf_name, clf in classifiers.items():
+        print(f"\n=== Entrenando {clf_name} ({N_RUNS} runs) ===")
 
-    val_pred = pipeline.predict(X_val)
-    f1_val = f1_score(y_val, val_pred, average="macro")
-    acc_val = accuracy_score(y_val, val_pred)
+        metrics_runs = {"f1": [], "acc": [], "prec": [], "rec": []}
 
-    print(f"[Validación interna]  F1={f1_val:.4f} | ACC={acc_val:.4f}\n")
+        for run in range(N_RUNS):
+            print(f"  → Run {run+1}/{N_RUNS}")
 
-    # --- Evaluación ---
-    y_pred = pipeline.predict(X_test)
-    y_prob = pipeline.predict_proba(X_test)[:, 1] if hasattr(pipeline, "predict_proba") else None
+            X_train_i, X_val, y_train_i, y_val = train_test_split(
+                X_train, y_train,
+                test_size=0.20,
+                random_state=seed + run,
+                stratify=y_train
+            )
 
-    f1 = f1_score(y_test, y_pred, average="macro")
-    acc = accuracy_score(y_test, y_pred)
-    prec = precision_score(y_test, y_pred, average="macro")
-    rec = recall_score(y_test, y_pred, average="macro")
+            pipeline = Pipeline([
+                ("scaler", StandardScaler(with_mean=False) if representation=="tfidf" else StandardScaler()),
+                ("clf", clf)
+            ])
 
-    print(f"Resultados ({representation}) {train_name}→{test_name}")
-    print(f"  F1: {f1:.4f} | Acc: {acc:.4f} | Prec: {prec:.4f} | Rec: {rec:.4f}")
+            pipeline.fit(X_train_i, y_train_i)
 
-        # ---------- BASELINE: DummyClassifier ----------
+            y_pred = pipeline.predict(X_test)
+
+            f1 = f1_score(y_test, y_pred, average="macro")
+            metrics_runs["f1"].append(f1)
+            metrics_runs["acc"].append(accuracy_score(y_test, y_pred))
+            metrics_runs["prec"].append(precision_score(y_test, y_pred, average="macro"))
+            metrics_runs["rec"].append(recall_score(y_test, y_pred, average="macro"))
+
+            # Guardar mejor modelo → para la gráfica
+            if f1 > best_f1:
+                best_f1 = f1
+                best_clf_name = clf_name
+                best_model = pipeline
+                best_pred = y_pred
+
+        results.append({
+            "train_cond": train_name,
+            "test_cond": test_name,
+            "representation": representation,
+            "classifier": clf_name,
+            "f1_mean": np.mean(metrics_runs["f1"]),
+            "f1_std": np.std(metrics_runs["f1"]),
+            "acc_mean": np.mean(metrics_runs["acc"]),
+            "acc_std": np.std(metrics_runs["acc"]),
+            "prec_mean": np.mean(metrics_runs["prec"]),
+            "prec_std": np.std(metrics_runs["prec"]),
+            "rec_mean": np.mean(metrics_runs["rec"]),
+            "rec_std": np.std(metrics_runs["rec"])
+        })
+
+    # ============================================================
+    # === BASELINE
+    # ============================================================
+
     dummy = DummyClassifier(strategy="most_frequent")
     dummy.fit(X_train, y_train)
     dummy_pred = dummy.predict(X_test)
 
-    f1_dummy = f1_score(y_test, dummy_pred, average="macro")
-    acc_dummy = accuracy_score(y_test, dummy_pred)
-    prec_dummy = precision_score(y_test, dummy_pred, average="macro")
-    rec_dummy = recall_score(y_test, dummy_pred, average="macro")
+    results.append({
+        "train_cond": train_name,
+        "test_cond": test_name,
+        "representation": representation,
+        "classifier": "Dummy",
+        "f1_mean": f1_score(y_test, dummy_pred, average="macro"),
+        "f1_std": 0,
+        "acc_mean": accuracy_score(y_test, dummy_pred),
+        "acc_std": 0,
+        "prec_mean": precision_score(y_test, dummy_pred, average="macro"),
+        "prec_std": 0,
+        "rec_mean": recall_score(y_test, dummy_pred, average="macro"),
+        "rec_std": 0,
+    })
 
-    print("\n[BASELINE DummyClassifier]")
-    print(f"  F1: {f1_dummy:.4f} | Acc: {acc_dummy:.4f} | Prec: {prec_dummy:.4f} | Rec: {rec_dummy:.4f}\n")
+    # ============================================================
+    # === MATRIZ DE CONFUSIÓN (del mejor clasificador)         ===
+    # ============================================================
 
-
-    # --- Matriz de confusión ---
-    cm = confusion_matrix(y_test, y_pred)
+    cm = confusion_matrix(y_test, best_pred)
     plt.figure(figsize=(4, 4))
     sns.heatmap(cm, annot=True, fmt="d", cmap="Purples")
     plt.xlabel("Predicho")
     plt.ylabel("Real")
-    plt.title(f"{representation.upper()} {train_name}→{test_name}")
+    plt.title(f"{best_clf_name} ({representation.upper()})\n{train_name}→{test_name}")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f"conf_matrix_{representation}_{train_name}_to_{test_name}.png"), dpi=300)
     plt.close()
 
-        # ---------- GUARDAR RESULTADOS ----------
-    registro = pd.DataFrame([{
-        "train_cond": train_name,
-        "test_cond": test_name,
-        "representation": representation,
+    # ============================================================
+    # === GUARDAR RESULTADOS
+    # ============================================================
 
-        "f1_macro": f1,
-        "accuracy": acc,
-        "precision": prec,
-        "recall": rec,
-
-        "dummy_f1_macro": f1_dummy,
-        "dummy_accuracy": acc_dummy,
-        "dummy_precision": prec_dummy,
-        "dummy_recall": rec_dummy
-    }])
-
+    results_df = pd.DataFrame(results)
     results_file = os.path.join(output_dir, "cross_condition_results.csv")
-    if os.path.exists(results_file):
-        registro.to_csv(results_file, mode='a', header=False, index=False)
-    else:
-        registro.to_csv(results_file, index=False)
 
-    return registro
+    if os.path.exists(results_file):
+        results_df.to_csv(results_file, mode='a', header=False, index=False)
+    else:
+        results_df.to_csv(results_file, index=False)
+
+    return results_df
+
 
 
 # -----------------------------------------------------
@@ -418,4 +440,36 @@ if __name__ == "__main__":
     plt.tight_layout()
 
     plt.savefig("output_cross/f1_comparison_triple.png", dpi=300)
+    plt.close()
+    
+    # === NUEVA GRÁFICA: Todos los modelos ===
+# Crear dataframe largo con todos los modelos
+plot_rows = []
+
+for _, row in df_all.iterrows():
+    model_name = f"{row['representation'].capitalize()} + {row['classifier']}"
+    plot_rows.append({
+        "train_cond": row["train_cond"],
+        "test_cond": row["test_cond"],
+        "model": model_name,
+        "f1": row["f1_mean"]
+    })
+
+    df_plot = pd.DataFrame(plot_rows)
+
+    plt.figure(figsize=(12,6))
+    sns.barplot(
+        data=df_plot,
+        x="train_cond",
+        y="f1",
+        hue="model",
+        palette="Set2"
+    )
+    plt.title("Comparativa Cross-Condition: Todos los modelos")
+    plt.ylabel("F1 Macro")
+    plt.xlabel("Condición de entrenamiento")
+    plt.ylim(0,1)
+    plt.legend(title="Modelo", bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.tight_layout()
+    plt.savefig("output_cross/f1_comparison_all_models.png", dpi=300)
     plt.close()
