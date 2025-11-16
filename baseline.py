@@ -255,7 +255,8 @@ def baseline_robertuito(input_csv, output_dir="output_robertuito", seed=42):
 
     tokenizer = AutoTokenizer.from_pretrained(ROBERTA_MODEL)
     model_cls = AutoModelForSequenceClassification.from_pretrained(ROBERTA_MODEL).to(device)
-    embedder = SentenceTransformer(ROBERTA_MODEL, device=device)
+    embedder = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2", device=device)
+
     predef_msg = "esto es lo peor que me ha pasado, tengo depresion, y no puedo dejar de comer comida poco sana"
     predef_emb = embedder.encode(predef_msg, convert_to_numpy=True)
 
@@ -322,7 +323,7 @@ def baseline_robertuito(input_csv, output_dir="output_robertuito", seed=42):
         "mlp__learning_rate_init": [1e-3, 5e-4]
     }
 
-    print("🚀 Entrenando MLP (GridSearchCV)...")
+    print(" Entrenando MLP (GridSearchCV)...")
     gs = GridSearchCV(pipeline, param_grid, cv=3, scoring="f1_macro", n_jobs=-1, verbose=1)
     gs.fit(X_train, y_train)
     print(" Entrenamiento completado. Mejores parámetros:", gs.best_params_)
@@ -345,11 +346,12 @@ def baseline_robertuito(input_csv, output_dir="output_robertuito", seed=42):
     joblib.dump(gs.best_estimator_, model_path)
     print(f" Modelo guardado en: {model_path}")
 
-    # === 📊 Gráficas ===
+    # === Gráficas ===
 
     base_name = Path(input_csv).stem
 
     # Curva Precision–Recall
+    """
     if y_prob is not None:
         precision, recall, _ = precision_recall_curve(y_test, y_prob)
         plt.figure()
@@ -375,7 +377,7 @@ def baseline_robertuito(input_csv, output_dir="output_robertuito", seed=42):
         plt.tight_layout()
         plt.savefig(f"plots/ROC_curve_{base_name}.png", dpi=300)
         plt.close()
-
+    """
     # Matriz de confusión
     cm = confusion_matrix(y_test, y_pred)
     plt.figure(figsize=(4, 4))
@@ -408,7 +410,7 @@ def baseline_robertuito(input_csv, output_dir="output_robertuito", seed=42):
     else:
         registro.to_csv(results_file, index=False)
 
-    print(f"💾 Resultados y gráficas guardados en: {results_file} / plots/")
+    print(f" Resultados y gráficas guardados en: {results_file} / plots/")
 
     return f1
 
