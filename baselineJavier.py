@@ -31,12 +31,12 @@ from sklearn.metrics import classification_report, confusion_matrix ,roc_curve, 
 
 
 PALABRAS_RUIDO = [
-    "perro", "nube", "cosa", "elemento", "random", "xD", "jeje", "árbol", "silla", "objeto", "rumor", "pixel", "caja", "supercalifragilisticoespialidoso"
+    "perro", "nube", "cosa", "elemento", "random", "xD", "jeje", "árbol", "silla", "objeto", "rumor", "pixel", "caja", "supercalifragilisticoespialidoso","palabra", "pera", "estepicursor", "atalaya", "escintilación"
 ]
 
 
 
-def baseline_robertuito(input_csv, output_dir="output_robertuito", seed=42):
+def baseline_robertuito(input_csv, output_dir="output_robertuito", seed=30):
     """
     Entrena un baseline con el modelo 'pysentimiento/robertuito-sentiment-analysis'
     usando embeddings + distancias coseno + probabilidades de sentimiento.
@@ -145,34 +145,6 @@ def baseline_robertuito(input_csv, output_dir="output_robertuito", seed=42):
 
     base_name = Path(input_csv).stem
 
-    # Curva Precision–Recall
-    """
-    if y_prob is not None:
-        precision, recall, _ = precision_recall_curve(y_test, y_prob)
-        plt.figure()
-        plt.plot(recall, precision, label=f"F1 = {f1:.2f}")
-        plt.xlabel("Recall")
-        plt.ylabel("Precision")
-        plt.title(f"Curva Precision–Recall ({base_name})")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(f"plots/PR_curve_{base_name}.png", dpi=300)
-        plt.close()
-
-        # Curva ROC
-        fpr, tpr, _ = roc_curve(y_test, y_prob)
-        roc_auc = auc(fpr, tpr)
-        plt.figure()
-        plt.plot(fpr, tpr, label=f"AUC = {roc_auc:.2f}")
-        plt.plot([0, 1], [0, 1], "k--")
-        plt.xlabel("False Positive Rate")
-        plt.ylabel("True Positive Rate")
-        plt.title(f"Curva ROC ({base_name})")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(f"plots/ROC_curve_{base_name}.png", dpi=300)
-        plt.close()
-    """
     # Matriz de confusión
     cm = confusion_matrix(y_test, y_pred)
     plt.figure(figsize=(4, 4))
@@ -208,6 +180,153 @@ def baseline_robertuito(input_csv, output_dir="output_robertuito", seed=42):
     print(f" Resultados y gráficas guardados en: {results_file} / plots/")
 
     return f1
+
+
+def baseline_robertuito_rf(input_csv, output_dir="output_robertuito_rf", seed=30):
+    """
+    Entrena un baseline con el modelo 'pysentimiento/robertuito-sentiment-analysis'
+    usando embeddings + distancias coseno + probabilidades de sentimiento.
+    Versión con RandomForestClassifier.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs("plots", exist_ok=True)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    ROBERTA_MODEL = "pysentimiento/robertuito-sentiment-analysis"
+
+    tokenizer = AutoTokenizer.from_pretrained(ROBERTA_MODEL)
+    model_cls = AutoModelForSequenceClassification.from_pretrained(ROBERTA_MODEL).to(device)
+    embedder = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2", device=device)
+
+    predef_msg = "esto es lo peor que me ha pasado, tengo depresion, y no puedo dejar de comer comida poco sana"
+    predef_emb = embedder.encode(predef_msg, convert_to_numpy=True)
+
+    print(" Modelos cargados en", device)
+
+    # Leer CSV
+    df = pd.read_csv(input_csv)
+    if "mensajes" in df.columns:
+        texts = df["mensajes"].astype(str).tolist()
+    elif "text" in df.columns:
+        texts = df["text"].astype(str).tolist()
+    else:
+        raise ValueError("El CSV debe contener columna 'mensajes' o 'text'")
+
+    if "label" in df.columns:
+        y = df["label"].astype(int).to_numpy()
+    elif "sufre" in df.columns:
+        y = df["sufre"].astype(int).to_numpy()
+    else:
+        raise ValueError("No se encontró ninguna columna de etiquetas ('label' o 'sufre').")
+
+    # Funciones auxiliares
+    def get_sentiment_probs(texts, batch_size=16):
+        model_cls.eval()
+        probs = []
+        with torch.no_grad():
+            for i in range(0, len(texts), batch_size):
+                batch = texts[i:i + batch_size]
+                tokens = tokenizer(batch, padding=True, truncation=True, return_tensors="pt").to(device)
+                out = model_cls(**tokens)
+                logits = out.logits
+                batch_probs = F.softmax(logits, dim=-1).cpu().numpy()
+                probs.append(batch_probs)
+        return np.vstack(probs)
+
+    def get_embeddings_and_dists(texts):
+        embs = embedder.encode(texts, convert_to_numpy=True)
+        dists = np.array([cosine(e, predef_emb) for e in embs]).reshape(-1, 1)
+        return embs, dists
+
+    # --- Generar features ---
+    print("🔹 Generando features...")
+    probs = get_sentiment_probs(texts)
+    embs, dists = get_embeddings_and_dists(texts)
+    X = np.hstack([embs, probs, dists])
+    print(" Features generadas:", X.shape)
+
+    # Split
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, stratify=y, random_state=seed
+    )
+
+    # === Random Forest ===
+    from sklearn.ensemble import RandomForestClassifier
+
+    pipeline = Pipeline([
+        ("scaler", StandardScaler()),
+        ("rf", RandomForestClassifier(random_state=seed))
+    ])
+
+    param_grid = {
+        "rf__n_estimators": [200, 400, 800],
+        "rf__max_depth": [None, 10, 20],
+        "rf__min_samples_split": [2, 5, 10],
+        "rf__min_samples_leaf": [1, 2, 4]
+    }
+
+    print(" Entrenando Random Forest (GridSearchCV)...")
+    gs = GridSearchCV(pipeline, param_grid, cv=3, scoring="f1_macro", n_jobs=-1, verbose=1)
+    gs.fit(X_train, y_train)
+
+    print(" Entrenamiento completado. Mejores parámetros:", gs.best_params_)
+
+    # --- Evaluación ---
+    y_pred = gs.predict(X_test)
+    y_prob = gs.predict_proba(X_test)[:, 1]
+
+    f1 = f1_score(y_test, y_pred, average="macro")
+    acc = accuracy_score(y_test, y_pred)
+    prec = precision_score(y_test, y_pred, average="macro")
+    rec = recall_score(y_test, y_pred, average="macro")
+
+    print(f"\n🔹 F1 macro: {f1:.4f}")
+    print("\n Reporte de clasificación:\n", classification_report(y_test, y_pred))
+    print(" Matriz de confusión:\n", confusion_matrix(y_test, y_pred))
+
+    # Guardado de modelo
+    model_path = os.path.join(output_dir, f"robertuito_rf_{Path(input_csv).stem}.joblib")
+    joblib.dump(gs.best_estimator_, model_path)
+    print(f" Modelo guardado en: {model_path}")
+
+    # === Matriz de confusión ===
+    base_name = Path(input_csv).stem
+    cm = confusion_matrix(y_test, y_pred)
+
+    plt.figure(figsize=(4, 4))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Greens")
+    plt.xlabel("Predicho")
+    plt.ylabel("Real")
+    plt.title(f"Matriz de confusión RF ({base_name})")
+    plt.tight_layout()
+    plt.savefig(f"plots/confusion_matrix_rf_{base_name}.png", dpi=300)
+    plt.close()
+
+    # === Guardar registro ===
+    from datetime import datetime
+    results_file = "resultados_baseline_rf.csv"
+
+    registro = pd.DataFrame([{
+        "condicion": base_name,
+        "modelo": "RandomForestClassifier",
+        "parametros": str(gs.best_params_),
+        "f1_macro": round(f1, 4),
+        "accuracy": round(acc, 4),
+        "precision": round(prec, 4),
+        "recall": round(rec, 4),
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "modelo_path": model_path
+    }])
+
+    if os.path.exists(results_file):
+        registro.to_csv(results_file, mode='a', header=False, index=False)
+    else:
+        registro.to_csv(results_file, index=False)
+
+    print(f" Resultados guardados en: {results_file}")
+
+    return f1
+
 
 
 def procesar_mentalrisk_arrays(root_folder, output_folder):
@@ -348,6 +467,13 @@ if __name__ == "__main__":
     hacer_embeddings = True
     # Paso 1: procesar archivos JSON → CSVs con mensajes y etiquetas
     procesar_mentalrisk_arrays("MentalRiskEs2023", "output_ruido")
+
+    baseline_robertuito_rf("output_ruido/Depresión.csv")
+    baseline_robertuito_rf("output_ruido/Depresión_ruido_5.csv")
+    baseline_robertuito_rf("output_ruido/Depresión_ruido_15.csv")
+    baseline_robertuito_rf("output_ruido/Depresión_ruido_30.csv")
+    baseline_robertuito_rf("output_ruido/Depresión_ruido_50.csv")
+
     baseline_robertuito("output_ruido/Depresión.csv")
     baseline_robertuito("output_ruido/Depresión_ruido_5.csv")
     baseline_robertuito("output_ruido/Depresión_ruido_15.csv")
