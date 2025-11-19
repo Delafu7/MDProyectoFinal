@@ -5,8 +5,11 @@ from pathlib import Path
 import torch
 import ast
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import f1_score ,precision_recall_curve,accuracy_score, precision_score, recall_score, roc_curve, auc, classification_report
+from sklearn.metrics import f1_score ,accuracy_score, precision_score, recall_score, classification_report
 from sklearn.neural_network import MLPClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+from sklearn.ensemble import RandomForestClassifier
 import numpy as np
 import seaborn as sns
 import matplotlib
@@ -27,6 +30,7 @@ from scipy.spatial.distance import cosine
 import os
 import joblib
 from sklearn.model_selection import GridSearchCV
+from datetime import datetime
 
 import nltk
 from nltk.corpus import stopwords
@@ -38,7 +42,12 @@ spanish_stopwords = stopwords.words("spanish")
 # -----------------------------------------------------
 
 def leer_subcarpeta(subfolder: Path) -> pd.DataFrame:
-    """Lee una subcarpeta (Train/Test) del dataset MentalRisk y devuelve un DataFrame con sujeto, mensajes y etiqueta."""
+    """Lee una subcarpeta (Train o Test) del dataset MentalRiskEs2023 con mensajes en arrays.
+    Parámetros:
+    - subfolder: Ruta a la subcarpeta (Path).
+    Retorna:
+    - DataFrame con columnas: 'sujeto', 'mensajes' (lista de strings), 'sufre' (etiqueta).
+    """
     gold_file = subfolder / 'Gold' / 'gold_a.txt'
     if not gold_file.exists():
         print(f"Aviso: no existe gold_a.txt en {subfolder}, se ignorará")
@@ -61,6 +70,37 @@ def leer_subcarpeta(subfolder: Path) -> pd.DataFrame:
     df = pd.merge(df, gold, left_on='sujeto', right_on='subject', how='left')
     df.rename(columns={'label': 'sufre'}, inplace=True)
     return df[['sujeto', 'mensajes', 'sufre']]
+
+
+def procesar_mentalrisk_arrays(root_folder, output_folder):
+    """Procesa el dataset MentalRiskEs2023 con mensajes en arrays,
+    y guarda un CSV por cada condición (Depresión, Ansiedad, TCA).
+    Parámetros:
+    - root_folder: Carpeta raíz del dataset MentalRiskEs2023.
+    - output_folder: Carpeta donde guardar los CSV procesados.
+    """
+    root_folder = Path(root_folder)
+    output_folder = Path(output_folder)
+    output_folder.mkdir(parents=True, exist_ok=True)
+
+    condiciones = [d for d in root_folder.iterdir() if d.is_dir()]
+
+    for cond in condiciones:
+        print(f"\nProcesando condición: {cond.name}")
+
+        df_train = leer_subcarpeta(cond / 'Train')
+        df_test = leer_subcarpeta(cond / 'Test')
+        df_final = pd.concat([df_train, df_test], ignore_index=True)
+
+        if df_final.empty:
+            print(f"Aviso: no hay datos para la condición {cond.name}, se ignora.")
+            continue
+
+        output_file = output_folder / f"{cond.name}.csv"
+        df_final['mensajes'] = df_final['mensajes'].apply(lambda x: str(x))
+        df_final.to_csv(output_file, index=False, encoding='utf-8')
+        print(f" Archivo creado: {output_file}")
+
 # -----------------------------------------------------
 #  PROCESAMIENTO INICIAL DEL DATASET
 # -----------------------------------------------------
@@ -68,9 +108,15 @@ def leer_subcarpeta(subfolder: Path) -> pd.DataFrame:
 
 def baseline_robertuito(input_csv, output_dir="output_robertuito", seed=42):
     """
-    Entrena un baseline con el modelo 'pysentimiento/robertuito-sentiment-analysis'
-    usando embeddings + distancias coseno + probabilidades de sentimiento.
-    Guarda métricas, parámetros y genera gráficas.
+    Realiza un experimento baseline usando RoBERTuito + MLPClassifier.
+    Guarda resultados, gráficas y el modelo entrenado.
+    Devuelve el F1 macro obtenido en la evaluación.
+    Parámetros:
+    - input_csv: Ruta al CSV de entrada con columnas 'mensajes' y 'sufre' o 'label'.
+    - output_dir: Directorio para guardar resultados y gráficas.
+    - seed: Semilla para reproducibilidad.
+    Retorna:
+    - F1 macro obtenido en la evaluación.
     """
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs("plots", exist_ok=True)
@@ -80,7 +126,7 @@ def baseline_robertuito(input_csv, output_dir="output_robertuito", seed=42):
 
     tokenizer = AutoTokenizer.from_pretrained(ROBERTA_MODEL)
     model_cls = AutoModelForSequenceClassification.from_pretrained(ROBERTA_MODEL).to(device)
-    embedder = SentenceTransformer(ROBERTA_MODEL, device=device)
+    embedder = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2", device=device)
     predef_msg = "esto es lo peor que me ha pasado, tengo depresion, y no puedo dejar de comer comida poco sana"
     predef_emb = embedder.encode(predef_msg, convert_to_numpy=True)
 
@@ -123,7 +169,7 @@ def baseline_robertuito(input_csv, output_dir="output_robertuito", seed=42):
         return embs, dists
 
     # --- Generar features ---
-    print("🔹 Generando features...")
+    print("Generando features...")
     probs = get_sentiment_probs(texts)
     embs, dists = get_embeddings_and_dists(texts)
     X = np.hstack([embs, probs, dists])
@@ -147,7 +193,7 @@ def baseline_robertuito(input_csv, output_dir="output_robertuito", seed=42):
         "mlp__learning_rate_init": [1e-3, 5e-4]
     }
 
-    print("🚀 Entrenando MLP (GridSearchCV)...")
+    print("Entrenando MLP (GridSearchCV)...")
     gs = GridSearchCV(pipeline, param_grid, cv=3, scoring="f1_macro", n_jobs=-1, verbose=1)
     gs.fit(X_train, y_train)
     print(" Entrenamiento completado. Mejores parámetros:", gs.best_params_)
@@ -161,7 +207,7 @@ def baseline_robertuito(input_csv, output_dir="output_robertuito", seed=42):
     prec = precision_score(y_test, y_pred, average="macro")
     rec = recall_score(y_test, y_pred, average="macro")
 
-    print(f"\n🔹 F1 macro: {f1:.4f}")
+    print(f"\nF1 macro: {f1:.4f}")
     print("\n Reporte de clasificación:\n", classification_report(y_test, y_pred))
     print(" Matriz de confusión:\n", confusion_matrix(y_test, y_pred))
 
@@ -170,50 +216,12 @@ def baseline_robertuito(input_csv, output_dir="output_robertuito", seed=42):
     joblib.dump(gs.best_estimator_, model_path)
     print(f" Modelo guardado en: {model_path}")
 
-    # === 📊 Gráficas ===
+    # === Gráficas ===
 
     base_name = Path(input_csv).stem
 
-    # Curva Precision–Recall
-    if y_prob is not None:
-        precision, recall, _ = precision_recall_curve(y_test, y_prob)
-        plt.figure()
-        plt.plot(recall, precision, label=f"F1 = {f1:.2f}")
-        plt.xlabel("Recall")
-        plt.ylabel("Precision")
-        plt.title(f"Curva Precision–Recall ({base_name})")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(f"plots/PR_curve_{base_name}.png", dpi=300)
-        plt.close()
-
-        # Curva ROC
-        fpr, tpr, _ = roc_curve(y_test, y_prob)
-        roc_auc = auc(fpr, tpr)
-        plt.figure()
-        plt.plot(fpr, tpr, label=f"AUC = {roc_auc:.2f}")
-        plt.plot([0, 1], [0, 1], "k--")
-        plt.xlabel("False Positive Rate")
-        plt.ylabel("True Positive Rate")
-        plt.title(f"Curva ROC ({base_name})")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(f"plots/ROC_curve_{base_name}.png", dpi=300)
-        plt.close()
-
-    # Matriz de confusión
-    cm = confusion_matrix(y_test, y_pred)
-    plt.figure(figsize=(4, 4))
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
-    plt.xlabel("Predicho")
-    plt.ylabel("Real")
-    plt.title(f"Matriz de confusión ({base_name})")
-    plt.tight_layout()
-    plt.savefig(f"plots/confusion_matrix_{base_name}.png", dpi=300)
-    plt.close()
 
     # === Guardar resultados en CSV ===
-    from datetime import datetime
     results_file = "resultados_baseline.csv"
 
     registro = pd.DataFrame([{
@@ -237,31 +245,6 @@ def baseline_robertuito(input_csv, output_dir="output_robertuito", seed=42):
 
     return f1
 
-def procesar_mentalrisk_arrays(root_folder, output_folder):
-    """Lee todas las condiciones de MentalRisk (TCA, Depresion, Ansiedad) y genera CSVs combinados con mensajes y labels."""
-    root_folder = Path(root_folder)
-    output_folder = Path(output_folder)
-    output_folder.mkdir(parents=True, exist_ok=True)
-
-    condiciones = [d for d in root_folder.iterdir() if d.is_dir()]
-
-    for cond in condiciones:
-        print(f"\nProcesando condición: {cond.name}")
-
-        df_train = leer_subcarpeta(cond / 'Train')
-        df_test = leer_subcarpeta(cond / 'Test')
-        df_final = pd.concat([df_train, df_test], ignore_index=True)
-
-        if df_final.empty:
-            print(f"Aviso: no hay datos para la condición {cond.name}, se ignora.")
-            continue
-
-        output_file = output_folder / f"{cond.name}.csv"
-        # Guardamos los mensajes como string (para poder recuperarlos después)
-        df_final['mensajes'] = df_final['mensajes'].apply(lambda x: str(x))
-        df_final.to_csv(output_file, index=False, encoding='utf-8')
-        print(f" Archivo creado: {output_file}")
-
 
 
 # -----------------------------------------------------
@@ -273,9 +256,18 @@ def procesar_mentalrisk_arrays(root_folder, output_folder):
 
 def cross_condition_experiment(train_csv, test_csv, output_dir="output_cross", seed=42, representation="robertuito"):
     """
-    Entrena y evalúa un modelo cross-condition entre dos datasets (ej. Depresión→Ansiedad).
-    Puede usar representaciones "roberta" o "tfidf".
-    Muestra barras de progreso y guarda resultados + gráficas.
+    Realiza un experimento de transferibilidad (cross-condition) entrenando
+    en un CSV y evaluando en otro, usando la representación especificada.
+    Guarda resultados, gráficas y la matriz de confusión del mejor modelo.
+    Devuelve un DataFrame con los resultados.
+    Parámetros:
+    - train_csv: Ruta al CSV de entrenamiento.
+    - test_csv: Ruta al CSV de prueba.
+    - output_dir: Directorio para guardar resultados y gráficas.
+    - seed: Semilla para reproducibilidad.
+    - representation: 'robertuito' o 'tfidf' para la representación de texto.
+    Retorna:
+    - DataFrame con los resultados del experimento.
     """
 
     os.makedirs(output_dir, exist_ok=True)
@@ -316,7 +308,7 @@ def cross_condition_experiment(train_csv, test_csv, output_dir="output_cross", s
         ROBERTA_MODEL = "pysentimiento/robertuito-sentiment-analysis"
         tokenizer = AutoTokenizer.from_pretrained(ROBERTA_MODEL)
         model_cls = AutoModelForSequenceClassification.from_pretrained(ROBERTA_MODEL).to(device)
-        embedder = SentenceTransformer(ROBERTA_MODEL, device=device)
+        embedder = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2", device=device)
 
         predef_msg = "esto es lo peor que me ha pasado, tengo depresion, y no puedo dejar de comer comida poco sana"
         predef_emb = embedder.encode(predef_msg, convert_to_numpy=True)
@@ -371,9 +363,7 @@ def cross_condition_experiment(train_csv, test_csv, output_dir="output_cross", s
     # === MULTI-CLASIFICADORES + MULTI-RUN                     ===
     # ============================================================
 
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.svm import SVC
-    from sklearn.ensemble import RandomForestClassifier
+
 
     N_RUNS = 5
 
@@ -424,7 +414,7 @@ def cross_condition_experiment(train_csv, test_csv, output_dir="output_cross", s
             f1 = f1_score(y_test, y_pred, average="macro")
             metrics_runs["f1"].append(f1)
             metrics_runs["acc"].append(accuracy_score(y_test, y_pred))
-            metrics_runs["prec"].append(precision_score(y_test, y_pred, average="macro"))
+            metrics_runs["prec"].append(precision_score(y_test, y_pred, average="macro",zero_division=0))
             metrics_runs["rec"].append(recall_score(y_test, y_pred, average="macro"))
 
             # Guardar mejor modelo → para la gráfica
@@ -466,7 +456,7 @@ def cross_condition_experiment(train_csv, test_csv, output_dir="output_cross", s
         "f1_std": 0,
         "acc_mean": accuracy_score(y_test, dummy_pred),
         "acc_std": 0,
-        "prec_mean": precision_score(y_test, dummy_pred, average="macro"),
+        "prec_mean": precision_score(y_test, dummy_pred, average="macro", zero_division=0),
         "prec_std": 0,
         "rec_mean": recall_score(y_test, dummy_pred, average="macro"),
         "rec_std": 0,
@@ -523,7 +513,10 @@ if __name__ == "__main__":
         ("output/Ansiedad.csv", "output/Depresión.csv"),
         ("output/TCA.csv", "output/Depresión.csv"),
         ("output/Ansiedad.csv", "output/TCA.csv"),
-        ("output/TCA.csv", "output/Ansiedad.csv")
+        ("output/TCA.csv", "output/Ansiedad.csv"),
+        ("output/Depresión.csv", "output/Depresión.csv"),
+        ("output/Ansiedad.csv", "output/Ansiedad.csv"),
+        ("output/TCA.csv", "output/TCA.csv"),
     ]
 
     resultados = []
@@ -584,7 +577,7 @@ if __name__ == "__main__":
     # === GRÁFICAS COMPARATIVAS                             ===
 
     # ---------------------------
-    # GRÁFICA COMPARATIVA SOLO MLP
+    #GRAFICA COMPARATIVA MLP BASELINE VS CROSS-CONDITION
     # ---------------------------
     # --- Cargar resultados ---
     df_baseline = pd.read_csv("resultados_baseline.csv")
@@ -608,7 +601,7 @@ if __name__ == "__main__":
     # Concatenar para graficar
     df_plot = pd.concat([df_baseline_mlp, df_cross_mean], ignore_index=True)
 
-    # --- Gráfica comparativa ---
+    
     plt.figure(figsize=(8,5))
     sns.barplot(data=df_plot, x="condicion", y="F1", hue="tipo", palette="Set2", errorbar=None)
     plt.title("Comparación F1 Macro: Baseline MLP vs Cross-condition MLP (RoBERTuito)")
@@ -619,9 +612,10 @@ if __name__ == "__main__":
     plt.tight_layout()
     plt.savefig("output_cross/f1_baseline_vs_crosscondition_robertuito.png", dpi=300)
     plt.close()
-        
+    
+    # ---------------------------
     # GRÁFICA COMPARATIVA TF-IDF vs RoBERTuito (todos los clasificadores)
-
+    # ---------------------------
     plt.figure(figsize=(6,4))
     sns.barplot(data=df_all, x="train_cond", y="f1_mean", hue="representation", errorbar=None)
     plt.title("Comparación TF-IDF vs RoBERTuito (Cross-condition)")
@@ -632,9 +626,9 @@ if __name__ == "__main__":
     plt.savefig("output_cross/f1_comparison_tfidf_vs_robertuito.png", dpi=300)
     plt.close()
 
-
-    # Heatmap F1 para RoBERTuito
-# Agrupar para dejar una sola fila por combinación
+    # ---------------------------
+    # HEATMAPS COMPARATIVOS TF-IDF Y ROBERTUITO
+    # ---------------------------
     classifiers = df_all["classifier"].unique()
 
     for clf in classifiers:
@@ -653,8 +647,10 @@ if __name__ == "__main__":
             plt.tight_layout()
             plt.savefig(f"output_cross/heatmap_{rep}_{clf}.png", dpi=300)
             plt.close()
-
-    # === Gráfica TRIPLE: RoBERTuito vs TF-IDF vs Dummy ===
+            
+    # ---------------------------
+    #GRÁFICA COMPARATIVA TRIPLE: ROBERTUITO vs TF-IDF vs DUMMY
+    # ---------------------------
     plot_rows = []
 
     for _, row in df_all.iterrows():
@@ -691,40 +687,9 @@ if __name__ == "__main__":
     plt.savefig("output_cross/f1_comparison_triple.png", dpi=300)
     plt.close()
 
-
-    # Gráfica
-    plot_rows = []
-
-    for _, row in df_all.iterrows():
-        model_name = f"{row['representation'].upper()} + {row['classifier']}"
-        plot_rows.append({
-            "train_cond": row["train_cond"],
-            "test_cond": row["test_cond"],
-            "model": model_name,
-            "f1": row["f1_mean"]
-        })
-
-    df_plot = pd.DataFrame(plot_rows)
-
-    plt.figure(figsize=(12,6))
-    sns.barplot(
-        data=df_plot,
-        x="train_cond",
-        y="f1",
-        hue="model",
-        palette="Set2", 
-        errorbar=None
-    )
-    plt.title("Comparativa Cross-Condition: Todos los modelos")
-    plt.ylabel("F1 Macro")
-    plt.xlabel("Condición de entrenamiento")
-    plt.ylim(0,1)
-    plt.legend(title="Modelo", bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.tight_layout()
-    plt.savefig("output_cross/f1_comparison_all_models.png", dpi=300)
-    plt.close()
-
-    # === NUEVA GRÁFICA: Todos los modelos ===
+    # ---------------------------
+    #GRÁFICA COMPARATIVA TODOS LOS MODELOS
+    # ---------------------------
     plot_rows = []
 
     for _, row in df_all.iterrows():
